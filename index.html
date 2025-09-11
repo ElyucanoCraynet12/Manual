@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crayfish System User Manual</title>
+    <link rel="icon" href="img/elyucano.jpg" type="image/jpg">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <style>
+        /* Manual page specific helpers (keeps existing tokens and look) */
+        .manual-header {
+            display:flex; align-items:center; justify-content:space-between; gap:1rem;
+            margin: 1rem auto 1.2rem; padding: .75rem 1rem; border-radius: 12px;
+            background: var(--card-bg-color); border: 1px solid var(--border-color);
+            box-shadow: var(--shadow);
+        }
+        .manual-brand { display:flex; align-items:center; gap:.75rem; }
+        .manual-brand img { width:40px; height:40px; border-radius:50%; object-fit:cover; }
+        .manual-title { font-size:1.4rem; font-weight:700; letter-spacing:.3px; }
+        .manual-cta a { display:inline-flex; align-items:center; gap:.5rem; }
+
+        .manual-container { max-width: 1100px; margin: 0 auto; padding: 1rem; }
+
+        .manual-grid {
+            display:grid; grid-template-columns: 280px 1fr; gap:1.25rem;
+        }
+        .manual-toc {
+            position: sticky; top: 1rem; align-self:start; background: var(--card-bg-color);
+            border:1px solid var(--border-color); border-radius:12px; padding:1rem; box-shadow: var(--shadow);
+        }
+        .manual-toc h3 { font-size:1rem; margin-bottom:.5rem; }
+        .manual-toc a { display:block; padding:.5rem .6rem; border-radius:8px; color: var(--text-secondary-color); }
+        .manual-toc a:hover, .manual-toc a.active { background: rgba(13,71,161,.1); color: var(--text-primary-color); }
+        .dark-theme .manual-toc a:hover, .dark-theme .manual-toc a.active { background: rgba(0,188,212,.12); }
+
+        .section-card { background: var(--card-bg-color); border:1px solid var(--border-color); border-radius:16px; box-shadow: var(--shadow); padding:1.25rem; margin-bottom:1rem; }
+        .section-card h2 { font-size:1.2rem; margin-bottom:.5rem; }
+        .section-card p { color: var(--text-secondary-color); line-height:1.65; }
+        .section-card ul { margin:.5rem 0 .25rem 1rem; }
+        .section-card li { margin:.35rem 0; }
+
+        .step-list { counter-reset: steps; display:grid; gap:.75rem; }
+        .step-list li { list-style:none; position:relative; padding-left:2.4rem; background: rgba(0,0,0,0.02); border:1px solid var(--border-color); border-radius:12px; padding:.9rem .9rem .9rem 2.6rem; }
+        .dark-theme .step-list li { background: rgba(255,255,255,0.04); }
+        .step-list li::before { counter-increment: steps; content: counter(steps); position:absolute; left:.7rem; top:.7rem; width:1.6rem; height:1.6rem; border-radius:50%; background: var(--primary-color); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; }
+        .dark-theme .step-list li::before { background: var(--secondary-color); color: var(--dark-bg); }
+
+        .wiring-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr)); gap: .75rem; }
+        .wiring-item { border:1px solid var(--border-color); border-radius:12px; padding: .9rem; background: var(--bg-color); }
+        .wiring-item h4 { margin-bottom:.25rem; font-size:1rem; }
+        .wiring-item code { background: rgba(0,0,0,0.06); padding:.15rem .35rem; border-radius:6px; }
+        .dark-theme .wiring-item code { background: rgba(255,255,255,0.06); }
+
+        .accordion { border-radius:12px; overflow:hidden; border:1px solid var(--border-color); }
+        .acc-item + .acc-item { border-top:1px solid var(--border-color); }
+        .acc-btn { width:100%; text-align:left; padding: .9rem 1rem; background: var(--card-bg-color); border:none; color: var(--text-primary-color); font-weight:600; cursor:pointer; display:flex; align-items:center; justify-content:space-between; }
+        .acc-panel { display:none; padding: .8rem 1rem 1rem; background: var(--bg-color); }
+        .acc-btn .chev { transition: transform .2s; }
+        .acc-btn[aria-expanded="true"] .chev { transform: rotate(180deg); }
+
+        .inline-note { display:inline-block; padding:.2rem .5rem; border-radius:999px; border:1px solid var(--border-color); font-size:.85rem; color: var(--text-secondary-color); }
+        .pill { border-radius:999px; padding:.2rem .6rem; font-size:.82rem; }
+        .pill.primary { background: rgba(13,71,161,.12); color: var(--primary-color); }
+        .dark-theme .pill.primary { background: rgba(0,188,212,.12); color: var(--secondary-color); }
+
+        .back-top { position: fixed; right: 16px; bottom: 16px; z-index: 50; display:none; }
+        .back-top button { border:none; border-radius:999px; padding:.7rem .9rem; background: linear-gradient(135deg, #4A90E2, #357ABD); color:#fff; box-shadow: 0 6px 18px rgba(74,144,226,.35); cursor:pointer; }
+        .back-top button:hover { transform: translateY(-2px); }
+
+        @media (max-width: 992px) { .manual-grid { grid-template-columns: 1fr; } .manual-toc { position: static; } }
+    </style>
+</head>
+<body class="dark-theme">
+    <div class="manual-container">
+        <header class="manual-header" role="banner" aria-label="User Manual Header">
+            <div class="manual-brand">
+                <img src="img/elyucano.jpg" alt="Logo">
+                <div>
+                    <div class="manual-title">ELYUCANO Crayfish — User Manual</div>
+                    <small class="inline-note">Modern guide • Mobile friendly • Step-by-step</small>
+                </div>
+            </div>
+            <div class="manual-cta">
+                <a class="btn btn-primary" href="" aria-label="Go to dashboard">
+                    <span>Open Dashboard</span>
+                </a>
+            </div>
+        </header>
+
+        <div class="manual-grid">
+            <nav class="manual-toc" aria-label="Manual sections">
+                <h3>Contents</h3>
+                <a href="#overview">Overview</a>
+                <a href="#system-setup">System Setup (Software)</a>
+                <a href="#hardware-setup">Hardware Setup</a>
+                <a href="#wiring-guide">Wiring Guide</a>
+                <a href="#first-run">First Run Checklist</a>
+                <a href="#troubleshooting">Troubleshooting</a>
+                <a href="#maintenance">Maintenance</a>
+                <a href="#safety">Safety Notes</a>
+            </nav>
+
+            <main>
+                <section id="overview" class="section-card" aria-labelledby="overview-title">
+                    <h2 id="overview-title">Overview</h2>
+                    <p>
+                        This manual helps you install, wire, and operate the ELYUCANO Crayfish Monitoring & Control system. It matches the look and accessibility of the dashboard and guides you through common issues.
+                    </p>
+                    <ul>
+                        <li><span class="pill primary">Sensors</span> Temperature, pH, Dissolved Oxygen, Turbidity</li>
+                        <li><span class="pill primary">Actuators</span> Feeder, Water Drain, Water Refill (via relays)</li>
+                        <li><span class="pill primary">Connectivity</span> ESP32 with Wi‑Fi and Firebase logging</li>
+                    </ul>
+                </section>
+
+                <section id="system-setup" class="section-card" aria-labelledby="system-setup-title">
+                    <h2 id="system-setup-title">System Setup (Software)</h2>
+                    <ol class="step-list">
+                        <li>
+                            Install Arduino IDE (2.x recommended). Add ESP32 boards via Boards Manager.
+                            Board: ESP32 Dev Module. Port: correct COM.
+                        </li>
+                        <li>
+                            Libraries: install required sensor libraries. Follow `ARDUINO_LIBRARY_SETUP.md` if present.
+                        </li>
+                        <li>
+                            Open `ESP32_Smart_Water_Monitoring_System.ino` or `crayfish_monitoring_system.ino`.
+                            Update Wi‑Fi SSID and password. Ensure Firebase keys match `dashboard.html`.
+                        </li>
+                        <li>
+                            Compile and upload. Monitor Serial at 115200 baud to verify sensor reads and Wi‑Fi connect.
+                        </li>
+                        <li>
+                            Open `dashboard.html`. Data tiles should update; use Quick Access to export logs as needed.
+                        </li>
+                    </ol>
+                </section>
+
+                <section id="hardware-setup" class="section-card" aria-labelledby="hardware-setup-title">
+                    <h2 id="hardware-setup-title">Hardware Setup</h2>
+                    <ul>
+                        <li>Mount ESP32 in a ventilated enclosure, away from water splashes.</li>
+                        <li>Use a 5V 2A regulated supply for sensors/relays; share ground with ESP32.</li>
+                        <li>Keep analog sensor wires short and twisted to reduce noise.</li>
+                        <li>Use waterproof sensor probes and strain relief near the tank.</li>
+                        <li>Relays must be rated above your pump/feeder load; use flyback diodes for DC loads.</li>
+                    </ul>
+                </section>
+
+                <section id="wiring-guide" class="section-card" aria-labelledby="wiring-guide-title">
+                    <h2 id="wiring-guide-title">Wiring Guide</h2>
+                    <p>Reference mapping. Adjust pins if your firmware uses different ones.</p>
+                    <div class="wiring-grid">
+                        <div class="wiring-item">
+                            <h4>Temperature (DS18B20)</h4>
+                            <p>Data → <code>GPIO 4</code>, Vcc 3.3V/5V, GND. Add 4.7kΩ pull‑up between Data and Vcc.</p>
+                        </div>
+                        <div class="wiring-item">
+                            <h4>pH Sensor (Analog)</h4>
+                            <p>Signal → <code>GPIO 34</code> (ADC1), Vcc 5V (per board), GND. Use shielded cable.</p>
+                        </div>
+                        <div class="wiring-item">
+                            <h4>Dissolved Oxygen (Analog)</h4>
+                            <p>Signal → <code>GPIO 35</code> (ADC1), Vcc per module, GND. Calibrate in air/zero solution.</p>
+                        </div>
+                        <div class="wiring-item">
+                            <h4>Turbidity (Analog)</h4>
+                            <p>Signal → <code>GPIO 32</code> (ADC1), Vcc 5V, GND. Keep probe vertical; avoid bubbles.</p>
+                        </div>
+                        <div class="wiring-item">
+                            <h4>Relay 1 — Feeder</h4>
+                            <p>IN → <code>GPIO 14</code>, Vcc 5V, GND. Use separate PSU for motors if possible.</p>
+                        </div>
+                        <div class="wiring-item">
+                            <h4>Relay 2 — Drain Pump</h4>
+                            <p>IN → <code>GPIO 27</code>, Vcc 5V, GND. Add breaker/RC snubber for AC pumps.</p>
+                        </div>
+                        <div class="wiring-item">
+                            <h4>Relay 3 — Refill Valve/Pump</h4>
+                            <p>IN → <code>GPIO 26</code>, Vcc 5V, GND. Float switch in series for extra safety.</p>
+                        </div>
+                        <div class="wiring-item">
+                            <h4>I2C (if used)</h4>
+                            <p>SDA → <code>GPIO 21</code>, SCL → <code>GPIO 22</code>, Vcc, GND. Add 4.7kΩ pull‑ups.</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="first-run" class="section-card" aria-labelledby="first-run-title">
+                    <h2 id="first-run-title">First Run Checklist</h2>
+                    <ol class="step-list">
+                        <li>Power on ESP32. Confirm no overheating and the onboard LED blinks.</li>
+                        <li>Serial Monitor: verify Wi‑Fi connected and IP address shown.</li>
+                        <li>Dashboard: tiles show values within expected ranges; no critical alerts.</li>
+                        <li>Trigger actuators briefly to confirm relay operation; observe load behavior.</li>
+                        <li>Calibrate sensors following `TURBIDITY_CALIBRATION_GUIDE.md` and related docs.</li>
+                    </ol>
+                </section>
+
+                <section id="troubleshooting" class="section-card" aria-labelledby="troubleshooting-title">
+                    <h2 id="troubleshooting-title">Troubleshooting</h2>
+                    <div class="accordion" role="tablist">
+                        <div class="acc-item">
+                            <button class="acc-btn" aria-expanded="false" aria-controls="acc-net" id="tab-net">
+                                Wi‑Fi not connecting
+                                <span class="chev">▾</span>
+                            </button>
+                            <div class="acc-panel" id="acc-net" role="region" aria-labelledby="tab-net">
+                                <ul>
+                                    <li>Check SSID/password in firmware; ensure 2.4GHz network.</li>
+                                    <li>Move ESP32 away from pumps/motors that cause EMI.</li>
+                                    <li>Power cycle router; verify DHCP assigns an IP.</li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-btn" aria-expanded="false" aria-controls="acc-sens" id="tab-sens">
+                                Sensors show 0 or erratic values
+                                <span class="chev">▾</span>
+                            </button>
+                            <div class="acc-panel" id="acc-sens" role="region" aria-labelledby="tab-sens">
+                                <ul>
+                                    <li>Confirm correct pins and shared ground.</li>
+                                    <li>Shorten analog leads; add 0.1µF‑1µF filter at ADC input.</li>
+                                    <li>Recalibrate using clean solutions; avoid bubbles on probes.</li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-btn" aria-expanded="false" aria-controls="acc-relay" id="tab-relay">
+                                Relays click but load doesn’t run
+                                <span class="chev">▾</span>
+                            </button>
+                            <div class="acc-panel" id="acc-relay" role="region" aria-labelledby="tab-relay">
+                                <ul>
+                                    <li>Verify common/NO/NC terminals and mains polarity.</li>
+                                    <li>Separate motor PSU; ensure relay current/voltage rating is sufficient.</li>
+                                    <li>For AC, consider SSR or snubber to reduce arcing.</li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-btn" aria-expanded="false" aria-controls="acc-fb" id="tab-fb">
+                                Data not appearing on dashboard
+                                <span class="chev">▾</span>
+                            </button>
+                            <div class="acc-panel" id="acc-fb" role="region" aria-labelledby="tab-fb">
+                                <ul>
+                                    <li>Match Firebase keys in firmware and `dashboard.html`.</li>
+                                    <li>Check database rules and network connectivity.</li>
+                                    <li>Use browser console for errors; verify CORS and script versions.</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="maintenance" class="section-card" aria-labelledby="maintenance-title">
+                    <h2 id="maintenance-title">Maintenance</h2>
+                    <ul>
+                        <li>Clean probes weekly in distilled water; recalibrate monthly.</li>
+                        <li>Inspect relay terminals for corrosion and tighten screws.</li>
+                        <li>Backup data exports (CSV/PDF) monthly.</li>
+                    </ul>
+                </section>
+
+                <section id="safety" class="section-card" aria-labelledby="safety-title">
+                    <h2 id="safety-title">Safety Notes</h2>
+                    <ul>
+                        <li>Keep mains wiring isolated; use proper enclosures and strain relief.</li>
+                        <li>Add GFCI/RCD for wet environments. Never handle live wires near water.</li>
+                        <li>Label all connectors; disconnect power before servicing.</li>
+                    </ul>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <div class="back-top" id="backTop">
+        <button aria-label="Back to top">↑</button>
+    </div>
+
+    <script>
+        // Smooth TOC highlighting and scroll
+        const tocLinks = Array.from(document.querySelectorAll('.manual-toc a'));
+        const sections = tocLinks.map(a => document.querySelector(a.getAttribute('href')));
+        const backTop = document.getElementById('backTop');
+
+        function onScroll() {
+            const y = window.scrollY + 120;
+            let activeIndex = 0;
+            sections.forEach((sec, i) => { if (sec && sec.offsetTop <= y) activeIndex = i; });
+            tocLinks.forEach((a, i) => a.classList.toggle('active', i === activeIndex));
+            backTop.style.display = window.scrollY > 300 ? 'block' : 'none';
+        }
+        window.addEventListener('scroll', onScroll, { passive: true });
+        onScroll();
+
+        tocLinks.forEach(a => {
+            a.addEventListener('click', e => {
+                e.preventDefault();
+                const target = document.querySelector(a.getAttribute('href'));
+                if (target) window.scrollTo({ top: target.offsetTop - 12, behavior: 'smooth' });
+            });
+        });
+
+        backTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+
+        // Accordion behavior
+        document.querySelectorAll('.acc-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const expanded = btn.getAttribute('aria-expanded') === 'true';
+                btn.setAttribute('aria-expanded', String(!expanded));
+                const panel = document.getElementById(btn.getAttribute('aria-controls'));
+                if (panel) panel.style.display = expanded ? 'none' : 'block';
+            });
+        });
+    </script>
+</body>
+</html>
+
