@@ -1,0 +1,1088 @@
+// ============================================================================
+// ELYUCANO CRAYFISH MONITORING SYSTEM - PRODUCTION VERSION
+// ============================================================================
+// Required Libraries
+#include <ESP32Servo.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DallasTemperature.h>
+#include <OneWire.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <Preferences.h>
+#include <SPIFFS.h>
+#include <time.h>
+
+// ============================================================================
+// PIN DEFINITIONS
+// ============================================================================
+#define PH_SENSOR_PIN 33        // pH sensor analog pin
+#define DO_SENSOR_PIN 35        // DO sensor analog pin
+#define TURBIDITY_SENSOR_PIN 32 // Turbidity sensor analog pin
+#define DS18B20_PIN 4           // DS18B20 temperature sensor pin
+#define RELAY_PIN 25            // Water treatment relay
+#define RELAY2_PIN 12           // Second relay for 30min cycle
+#define SERVO_PIN 13            // Servo motor for feeding
+#define GSM_RX_PIN 16           // GSM RX pin
+#define GSM_TX_PIN 17           // GSM TX pin
+#define STATUS_LED_PIN 2        // Built-in LED for status indication
+
+// ============================================================================
+// CRITICAL CONSTANTS AND THRESHOLDS
+// ============================================================================
+// TURBIDITY THRESHOLDS
+#define TURBIDITY_DIRTY_MAX 89.0   // <=89 NTU = DIRTY water
+#define TURBIDITY_CLEAR_MIN 90.0   // >=90 NTU = CLEAR water
+
+// CALIBRATION VALUES (PRE-CALIBRATED)
+#define TURBIDITY_VOLTAGE_CLEAR 1.9276  // Pre-calibrated clear water reading
+#define TURBIDITY_VOLTAGE_DIRTY 1.5932  // Pre-calibrated dirty water reading
+
+// AUTOMATED FEEDING SCHEDULE
+#define MORNING_FEED_HOUR   10
+#define MORNING_FEED_MINUTE 10
+#define EVENING_FEED_HOUR   22
+#define EVENING_FEED_MINUTE 10
+#define SERVO_CYCLES 5
+#define SERVO_HOLD_TIME 2000
+#define SERVO_PAUSE 2000
+
+// RELAY CONTROL
+#define RELAY_ON_DURATION 300000      // 5 minutes
+#define RELAY2_ON_DURATION 1800000    // 30 minutes ON
+#define RELAY2_OFF_DURATION 1800000   // 30 minutes OFF
+#define SERVO_FEED_ANGLE 90
+#define SERVO_FEED_DURATION 10000
+
+// SMS ANTI-SPAM
+#define SMS_COOLDOWN_PERIOD 1800000   // 30 minutes
+#define EMERGENCY_ALERT_COOLDOWN 300000  // 5 minutes
+
+// Timing Constants
+#define SENSOR_READ_INTERVAL 5000
+#define LCD_SCREEN_TIME 5000
+#define DATABASE_RETRY_DELAY 5000
+#define MAX_DATABASE_RETRIES 2
+
+// SMS Recipient Number
+const char ALERT_MOBILE_NUMBER[] = "09456718005";
+
+// Sensor Reading Constants
+#define SENSOR_READINGS_COUNT 5
+#define SENSOR_READING_DELAY 100
+
+// pH Calibration
+#define PH_REF_VOLTAGE 2.500
+#define PH_REF_PH 7.0
+#define PH_SLOPE_V_PER_PH 0.18
+
+// DO Calibration
+#define DO_REF_VOLTAGE 2.000
+#define DO_REF_MG_L 8.3
+#define DO_ZERO_OFFSET_V 0.0
+
+// Firebase Configuration
+#define FIREBASE_HOST "elyucano-crayfishdb-default-rtdb.firebaseio.com"
+#define FIREBASE_AUTH "AIzaSyB_sLjv_cJ_Vu0YQokofmtjfn90HnWV8y4"
+#define FIREBASE_CONFIG_PATH "/deviceConfig.json"
+#define FIREBASE_SENSOR_PATH "/sensorReadings/"
+#define FIREBASE_WATER_CONDITION_PATH "/waterCondition/current.json"
+
+// User WiFi Credentials
+#define USER_WIFI_SSID "Chan"
+#define USER_WIFI_PASSWORD "onetoeight"
+
+// ============================================================================
+// GLOBAL VARIABLES
+// ============================================================================
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+OneWire oneWire(DS18B20_PIN);
+DallasTemperature tempSensor(&oneWire);
+Servo feedingServo;
+HardwareSerial gsmSerial(2);
+Preferences preferences;
+
+// Sensor Data
+float waterTemperature = 0.0;
+float waterPH = 0.0;
+float dissolvedOxygen = 0.0;
+float turbidityNTU = 0.0;
+float turbidityHistory[5] = {0};
+int turbidityHistoryIndex = 0;
+float averageTurbidity = 0.0;
+bool turbidityStable = true;
+
+// System State
+bool lcdAvailable = false;
+bool relayActive = false;
+bool relay2Active = false;
+bool servoFeedingInProgress = false;
+bool wifiConnected = false;
+bool databaseFetched = false;
+bool databaseFetchSuccess = false;
+bool safeMode = false;
+bool gsmReady = false;
+
+// Automated Feeding Control State
+bool lastFeedingMorning = false;
+bool lastFeedingEvening = false;
+
+// Timing Variables
+unsigned long lastSensorRead = 0;
+unsigned long lastLCDChange = 0;
+unsigned long relayStartTime = 0;
+unsigned long relay2StartTime = 0;
+unsigned long lastWiFiCheck = 0;
+unsigned long lastSMSAlert = 0;
+unsigned long lastEmergencyAlert = 0;
+bool emergencyAlertSent = false;
+unsigned long lastDatabaseRetry = 0;
+unsigned long lastTimeDisplay = 0;
+int databaseRetryCount = 0;
+int currentLCDScreen = 0;
+
+// WiFi Variables
+String connectedSSID = "";
+
+// Runtime turbidity calibration
+float turbidityVoltageClearCal = TURBIDITY_VOLTAGE_CLEAR;
+float turbidityVoltageDirtyCal = TURBIDITY_VOLTAGE_DIRTY;
+
+// ============================================================================
+// SETUP FUNCTION
+// ============================================================================
+void setup() {
+  Serial.begin(115200);
+  Serial.println("SYSTEM LOADING");
+
+  // Initialize status LED
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, HIGH);
+
+  // Initialize preferences
+  preferences.begin("crayfish", false);
+  turbidityVoltageClearCal = TURBIDITY_VOLTAGE_CLEAR;
+  turbidityVoltageDirtyCal = TURBIDITY_VOLTAGE_DIRTY;
+  preferences.putFloat("turbidity_v_clear", turbidityVoltageClearCal);
+  preferences.putFloat("turbidity_v_dirty", turbidityVoltageDirtyCal);
+
+  // Initialize I2C and LCD
+  Wire.begin();
+  delay(1000);
+  initializeLCD();
+
+  // Initialize sensors and actuators
+  initializeSensors();
+  initializeActuators();
+  initializeGSM();
+
+  // Setup WiFi and fetch database configuration
+  setupWiFiAndDatabase();
+  setupNTP();
+
+  // Initial sensor reading
+  readAllSensors();
+  updateLCD();
+
+  // Turn off status LED after successful initialization
+  digitalWrite(STATUS_LED_PIN, LOW);
+  Serial.println("✅ System initialization complete!");
+
+  // Test servo motor on startup
+  feedingServo.write(0);
+  delay(1000);
+  feedingServo.write(90);
+  delay(1000);
+  feedingServo.write(0);
+  delay(1000);
+  Serial.println("✅ Servo motor test completed");
+
+  // Send startup SMS
+  sendSMSAlert("ELYUCANO Monitoring System is now operational. Automated feeding schedule: Morning " + String(MORNING_FEED_HOUR) + ":" + String(MORNING_FEED_MINUTE) + ", Evening " + String(EVENING_FEED_HOUR) + ":" + String(EVENING_FEED_MINUTE) + ". Scan the QR code to access the dashboard and user manual.");
+
+  // Set initial timing
+  lastSensorRead = millis();
+  lastLCDChange = millis();
+  lastWiFiCheck = millis();
+  lastSMSAlert = millis();
+  lastEmergencyAlert = millis();
+  emergencyAlertSent = false;
+  relay2StartTime = millis();
+
+  // Display initial status
+  displayTimeAndStatus();
+}
+
+// ============================================================================
+// MAIN LOOP
+// ============================================================================
+void loop() {
+  unsigned long currentTime = millis();
+
+  // Display current time and connection status every 30 seconds
+  if (currentTime - lastTimeDisplay >= 30000) {
+    displayTimeAndStatus();
+    lastTimeDisplay = currentTime;
+  }
+
+  // Check WiFi connection every 30 seconds
+  if (currentTime - lastWiFiCheck >= 30000) {
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("⚠️ WiFi disconnected, attempting to reconnect...");
+      setupWiFiAndDatabase();
+    }
+    lastWiFiCheck = currentTime;
+  }
+
+  // Read sensors every 5 seconds
+  if (currentTime - lastSensorRead >= SENSOR_READ_INTERVAL) {
+    Serial.println("📊 Reading sensors...");
+    readAllSensors();
+    lastSensorRead = currentTime;
+    processWaterQuality();
+    controlRelay();
+    controlRelay2();
+    checkSensorFailures();
+
+    // Send data to Firebase if WiFi is available
+    if (wifiConnected) {
+      sendSensorDataToFirebase();
+    } else {
+      Serial.println("⚠️ Skipping Firebase upload - no WiFi connection");
+    }
+  }
+
+  // Update LCD display every 5 seconds
+  if (currentTime - lastLCDChange >= LCD_SCREEN_TIME) {
+    cycleLCDDisplay();
+    lastLCDChange = currentTime;
+  }
+
+  // Check automated feeding control
+  checkAutomatedFeeding();
+
+  // Debug: Check GSM status periodically
+  static unsigned long lastGSMCheck = 0;
+  if (currentTime - lastGSMCheck >= 60000) {
+    if (!gsmReady) {
+      Serial.println("🔄 GSM not ready, attempting re-initialization...");
+      initializeGSM();
+    }
+    lastGSMCheck = currentTime;
+  }
+
+  delay(100);
+}
+
+// ============================================================================
+// DATABASE AND WIFI FUNCTIONS
+// ============================================================================
+void setupWiFiAndDatabase() {
+  Serial.println("🔄 Setting up WiFi...");
+  if (attemptWiFiConnection(String(USER_WIFI_SSID), String(USER_WIFI_PASSWORD), "user credentials")) {
+    connectedSSID = String(USER_WIFI_SSID);
+    wifiConnected = true;
+  } else {
+    Serial.println("❌ Failed to connect using user credentials");
+    wifiConnected = false;
+    safeMode = true;
+  }
+}
+
+bool attemptWiFiConnection(const String& ssid, const String& password, const String& connectionType) {
+  Serial.println("🔗 Attempting " + connectionType + " connection...");
+  WiFi.begin(ssid.c_str(), password.c_str());
+  int attempts = 0;
+  const int maxAttempts = 20;
+  while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ WiFi connected successfully!");
+    Serial.println("   Network: " + ssid);
+    Serial.println("   IP Address: " + WiFi.localIP().toString());
+    return true;
+  } else {
+    Serial.println("\n❌ WiFi connection failed");
+    return false;
+  }
+}
+
+// ============================================================================
+// SENSOR READING FUNCTIONS
+// ============================================================================
+void readAllSensors() {
+  waterTemperature = readTemperatureSensor();
+  waterPH = readPHSensor();
+  dissolvedOxygen = readDOSensor();
+  turbidityNTU = readTurbiditySensor();
+  updateTurbidityHistory();
+
+  Serial.println("=== SENSOR READINGS ===");
+  Serial.println("Temperature: " + String(waterTemperature, 1) + "°C");
+  Serial.println("pH Level: " + String(waterPH, 2));
+  Serial.println("Dissolved Oxygen: " + String(dissolvedOxygen, 2) + " mg/L");
+  Serial.println("Turbidity: " + String(turbidityNTU, 1) + " NTU (Avg: " + String(averageTurbidity, 1) + " NTU)");
+  Serial.println("Water Condition: " + getWaterCondition());
+  Serial.println("=======================");
+}
+
+float readTurbiditySensor() {
+  const int samples = 15;
+  int rawBuf[samples];
+
+  for (int i = 0; i < samples; i++) {
+    rawBuf[i] = analogRead(TURBIDITY_SENSOR_PIN);
+    delay(15);
+  }
+
+  // Sort for median
+  for (int i = 1; i < samples; i++) {
+    int key = rawBuf[i];
+    int j = i - 1;
+    while (j >= 0 && rawBuf[j] > key) {
+      rawBuf[j + 1] = rawBuf[j];
+      j--;
+    }
+    rawBuf[j + 1] = key;
+  }
+
+  int medianRaw = rawBuf[samples / 2];
+  float voltage = (medianRaw / 4095.0) * 3.3;
+
+  // Algorithm for low-voltage turbidity sensor
+  float vClear = turbidityVoltageClearCal;
+  float vDirty = turbidityVoltageDirtyCal;
+  float center = 0.5f * (vClear + vDirty);
+  float voltageDiff = voltage - center;
+
+  float ntu;
+  if (fabs(voltageDiff) < 0.001) {
+    ntu = 94.0;
+  } else if (voltageDiff > 0) {
+    ntu = 94.0 + (voltageDiff * 375.0);
+  } else {
+    ntu = 94.0 + (voltageDiff * 375.0);
+  }
+
+  if (ntu < 0) ntu = 0;
+  if (ntu > 100) ntu = 100;
+
+  return ntu;
+}
+
+float readPHSensor() {
+  float totalValue = 0;
+  int validReadings = 0;
+  for (int i = 0; i < SENSOR_READINGS_COUNT; i++) {
+    int rawValue = analogRead(PH_SENSOR_PIN);
+    float voltage = (rawValue / 4095.0) * 3.3;
+    float pH = PH_REF_PH + (voltage - PH_REF_VOLTAGE) / PH_SLOPE_V_PER_PH;
+    if (pH >= 0 && pH <= 14) {
+      totalValue += pH;
+      validReadings++;
+    }
+    delay(SENSOR_READING_DELAY);
+  }
+  return (validReadings > 0) ? (totalValue / validReadings) : 7.0;
+}
+
+float readDOSensor() {
+  float totalValue = 0;
+  int validReadings = 0;
+  for (int i = 0; i < SENSOR_READINGS_COUNT; i++) {
+    int rawValue = analogRead(DO_SENSOR_PIN);
+    float voltage = (rawValue / 4095.0) * 3.3;
+    float doValue = (voltage - DO_ZERO_OFFSET_V) * (DO_REF_MG_L / (DO_REF_VOLTAGE - DO_ZERO_OFFSET_V));
+    if (doValue < 0) doValue = 0;
+    if (doValue >= 0 && doValue <= 20) {
+      totalValue += doValue;
+      validReadings++;
+    }
+    delay(SENSOR_READING_DELAY);
+  }
+  return (validReadings > 0) ? (totalValue / validReadings) : 8.0;
+}
+
+float readTemperatureSensor() {
+  float totalValue = 0;
+  int validReadings = 0;
+  for (int i = 0; i < SENSOR_READINGS_COUNT; i++) {
+    tempSensor.requestTemperatures();
+    float temp = tempSensor.getTempCByIndex(0);
+    if (temp != DEVICE_DISCONNECTED_C && temp >= -40 && temp <= 80) {
+      totalValue += temp;
+      validReadings++;
+    }
+    delay(SENSOR_READING_DELAY);
+  }
+  return (validReadings > 0) ? (totalValue / validReadings) : 25.0;
+}
+
+// ============================================================================
+// WATER QUALITY PROCESSING
+// ============================================================================
+void processWaterQuality() {
+  // Handle emergency 0.0 NTU condition
+  if (turbidityNTU == 0.0) {
+    handleEmergencyZeroTurbidity();
+    return;
+  }
+
+  // Reset emergency alert flag when turbidity changes from 0.0
+  if (emergencyAlertSent && turbidityNTU > 0.0) {
+    emergencyAlertSent = false;
+    Serial.println("✅ Emergency condition cleared - turbidity reading changed from 0.0 NTU to " + String(turbidityNTU, 1) + " NTU");
+  }
+
+  String waterCondition = getWaterCondition();
+  Serial.println("Water Condition (Turbidity): " + waterCondition + " [" + String(turbidityNTU, 1) + " NTU]");
+
+  float decisionTurbidity = turbidityNTU;
+
+  // Activate relay when water is DIRTY
+  if (decisionTurbidity <= TURBIDITY_DIRTY_MAX) {
+    if (!relayActive) {
+      Serial.println("🚨 WATER CHANGE START: Condition=" + waterCondition + 
+                     ", Decision turbidity: " + String(decisionTurbidity, 1) + " NTU");
+      activateWaterReplacement();
+    }
+  }
+
+  // Deactivate relay when water is CLEAR
+  if (decisionTurbidity >= TURBIDITY_CLEAR_MIN) {
+    if (relayActive) {
+      Serial.println("✅ WATER CHANGE COMPLETE: Water is CLEAR. Decision turbidity: " + String(decisionTurbidity, 1) + " NTU");
+      deactivateWaterReplacement();
+    }
+  }
+}
+
+// ============================================================================
+// EMERGENCY DETECTION FUNCTIONS
+// ============================================================================
+void handleEmergencyZeroTurbidity() {
+  unsigned long currentTime = millis();
+  Serial.println("🚨 EMERGENCY: Possible tank leak detected (0.0 NTU)");
+
+  if (!emergencyAlertSent) {
+    String emergencyMessage = "The water has gone down mysteriously. Try checking the fish tank to see if it's leaking.";
+    sendSMSAlert(emergencyMessage);
+    emergencyAlertSent = true;
+    lastEmergencyAlert = currentTime;
+    Serial.println("📱 Emergency SMS alert sent: Tank leak/sensor failure detected");
+  } else {
+    Serial.println("📱 Emergency alert already sent for this 0.0 NTU condition");
+  }
+}
+
+void activateWaterReplacement() {
+  relayActive = true;
+  relayStartTime = millis();
+  digitalWrite(RELAY_PIN, LOW);
+  Serial.println("💧 Activating water replacement (WATER CHANGING STARTED)...");
+  
+  String alertMessage = "WATER CHANGING STARTED. Condition: " + getWaterCondition() +
+                        ", Turbidity: " + String(turbidityNTU, 1) + " NTU. Water pump is ON.";
+  sendSMSAlert(alertMessage);
+}
+
+void deactivateWaterReplacement() {
+  relayActive = false;
+  digitalWrite(RELAY_PIN, HIGH);
+  Serial.println("💧 Deactivating water replacement (WATER CHANGING COMPLETED)...");
+  
+  String alertMessage = "WATER CHANGING COMPLETED. Condition: " + getWaterCondition() + 
+                        ", Turbidity: " + String(turbidityNTU, 1) + " NTU. Relay OFF.";
+  sendSMSAlert(alertMessage);
+}
+
+void controlRelay() {
+  // Relay control is handled in processWaterQuality()
+}
+
+void controlRelay2() {
+  unsigned long currentTime = millis();
+  if (!relay2Active) {
+    if (currentTime - relay2StartTime >= RELAY2_OFF_DURATION) {
+      relay2Active = true;
+      relay2StartTime = currentTime;
+      digitalWrite(RELAY2_PIN, LOW);
+      Serial.println("🔄 Relay2 activated - 30 minutes ON cycle started");
+      sendSMSAlert("Relay2 activated - 30 minutes ON cycle started");
+    }
+  } else {
+    if (currentTime - relay2StartTime >= RELAY2_ON_DURATION) {
+      relay2Active = false;
+      relay2StartTime = currentTime;
+      digitalWrite(RELAY2_PIN, HIGH);
+      Serial.println("🔄 Relay2 deactivated - 30 minutes OFF cycle started");
+      sendSMSAlert("Relay2 deactivated - 30 minutes OFF cycle started");
+    }
+  }
+}
+
+String getWaterCondition() {
+  if (turbidityNTU == 0.0) {
+    return "POSSIBLE LEAK";
+  }
+  if (turbidityNTU >= TURBIDITY_CLEAR_MIN) {
+    return "WATER IS SAFE";
+  } else {
+    return "WATER IS UNSAFE";
+  }
+}
+
+// ============================================================================
+// AUTOMATED FEEDING SYSTEM
+// ============================================================================
+void checkAutomatedFeeding() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to get time");
+    return;
+  }
+  int currentHour = timeinfo.tm_hour;
+  int currentMinute = timeinfo.tm_min;
+
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 10000) {
+    Serial.printf("Current time: %02d:%02d\n", currentHour, currentMinute);
+    lastPrint = millis();
+  }
+
+  // Morning Feeding
+  if (currentHour == MORNING_FEED_HOUR && currentMinute == MORNING_FEED_MINUTE) {
+    if (!lastFeedingMorning) {
+      Serial.println("🌅 Morning feeding started...");
+      performFeeding();
+      lastFeedingMorning = true;
+    }
+  } else if (currentHour == MORNING_FEED_HOUR + 1) {
+    lastFeedingMorning = false;
+  }
+
+  // Evening Feeding
+  if (currentHour == EVENING_FEED_HOUR && currentMinute == EVENING_FEED_MINUTE) {
+    if (!lastFeedingEvening) {
+      Serial.println("🌙 Evening feeding started...");
+      performFeeding();
+      lastFeedingEvening = true;
+    }
+  } else if (currentHour == EVENING_FEED_HOUR + 1) {
+    lastFeedingEvening = false;
+  }
+}
+
+void performFeeding() {
+  for (int cycle = 1; cycle <= SERVO_CYCLES; cycle++) {
+    Serial.printf("Cycle %d/%d: Opening feeder\n", cycle, SERVO_CYCLES);
+    feedingServo.write(SERVO_FEED_ANGLE);
+    delay(SERVO_HOLD_TIME);
+    Serial.println("Closing feeder");
+    feedingServo.write(0);
+    if (cycle < SERVO_CYCLES) delay(SERVO_PAUSE);
+  }
+  Serial.println("✅ Feeding sequence completed");
+  sendSMSAlert("Automated feeding completed- " + String(SERVO_CYCLES) + " cycles executed");
+}
+
+// ============================================================================
+// GSM FUNCTIONS
+// ============================================================================
+String readGsmResponse(unsigned long timeoutMs) {
+  String resp = "";
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    while (gsmSerial.available()) {
+      char c = (char)gsmSerial.read();
+      resp += c;
+    }
+  }
+  return resp;
+}
+
+bool waitForSubstring(const String& token, unsigned long timeoutMs) {
+  unsigned long start = millis();
+  String buf = "";
+  while (millis() - start < timeoutMs) {
+    while (gsmSerial.available()) {
+      char c = (char)gsmSerial.read();
+      buf += c;
+      if (buf.indexOf(token) != -1) return true;
+    }
+  }
+  return false;
+}
+
+bool waitForChar(char ch, unsigned long timeoutMs) {
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    while (gsmSerial.available()) {
+      char c = (char)gsmSerial.read();
+      if (c == ch) return true;
+    }
+  }
+  return false;
+}
+
+void sendSMSAlert(const String& message) {
+  if (!gsmReady) {
+    initializeGSM();
+  }
+  Serial.println("📱 Sending SMS: " + message);
+
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    gsmSerial.println("AT+CMGF=1");
+    waitForSubstring("OK", 1000);
+    gsmSerial.println("AT+CMGD=1,4");
+    waitForSubstring("OK", 2000);
+    gsmSerial.print("AT+CMGS=\"");
+    gsmSerial.print(ALERT_MOBILE_NUMBER);
+    gsmSerial.println("\"");
+    if (!waitForChar('>', 5000)) {
+      Serial.println("❌ SMS attempt " + String(attempt) + ": No prompt '>'");
+      continue;
+    }
+    gsmSerial.print(message);
+    gsmSerial.write(26);
+    String resp = readGsmResponse(15000);
+    if (resp.indexOf("+CMGS:") != -1 && resp.indexOf("OK") != -1) {
+      Serial.println("✅ SMS sent successfully to: " + String(ALERT_MOBILE_NUMBER));
+      return;
+    } else {
+      Serial.println("❌ SMS attempt " + String(attempt) + " failed. Response: " + resp);
+      delay(1000);
+    }
+  }
+  Serial.println("❌ Failed to send SMS after retries");
+}
+
+void sendSMSAlertNoBlock(const String& message) {
+  if (!gsmReady) {
+    Serial.println("📱 SMS: GSM not ready, skipping SMS response");
+    return;
+  }
+  Serial.println("📱 Attempting to send SMS response: " + message);
+  gsmSerial.println("AT+CMGF=1");
+  if (!waitForSubstring("OK", 1000)) {
+    Serial.println("📱 SMS: Failed to set text mode, skipping response");
+    return;
+  }
+  gsmSerial.print("AT+CMGS=\"");
+  gsmSerial.print(ALERT_MOBILE_NUMBER);
+  gsmSerial.println("\"");
+  if (!waitForChar('>', 3000)) {
+    Serial.println("📱 SMS: No prompt '>', skipping response");
+    return;
+  }
+  gsmSerial.print(message);
+  gsmSerial.write(26);
+  String resp = readGsmResponse(10000);
+  if (resp.indexOf("+CMGS:") != -1 && resp.indexOf("OK") != -1) {
+    Serial.println("✅ SMS response sent successfully");
+  } else {
+    Serial.println("⚠️ SMS response may have failed, but command was executed");
+  }
+}
+
+// ============================================================================
+// INITIALIZATION FUNCTIONS
+// ============================================================================
+void initializeLCD() {
+  Serial.println("Initializing LCD...");
+  int lcdAddresses[] = {0x27, 0x3F, 0x26, 0x25};
+  for (int i = 0; i < 4; i++) {
+    Wire.beginTransmission(lcdAddresses[i]);
+    byte error = Wire.endTransmission();
+    if (error == 0) {
+      Serial.println("LCD found at address 0x" + String(lcdAddresses[i], HEX));
+      lcd.begin(16, 2);
+      delay(200);
+      lcd.clear();
+      lcd.backlight();
+      lcd.setCursor(0, 0);
+      lcd.print("ELYUCANO SYSTEM");
+      lcd.setCursor(0, 1);
+      lcd.print("STARTING UP...");
+      delay(1000);
+      lcdAvailable = true;
+      Serial.println("LCD initialized successfully");
+      break;
+    }
+  }
+  if (!lcdAvailable) {
+    Serial.println("WARNING: LCD not found. System will continue without LCD.");
+  }
+}
+
+void initializeSensors() {
+  Serial.println("Initializing sensors...");
+  tempSensor.begin();
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+  Serial.println("Sensors initialized successfully");
+}
+
+void initializeActuators() {
+  Serial.println("Initializing actuators...");
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);
+  pinMode(RELAY2_PIN, OUTPUT);
+  digitalWrite(RELAY2_PIN, HIGH);
+  feedingServo.attach(SERVO_PIN);
+  feedingServo.write(0);
+  Serial.println("Actuators initialized successfully");
+}
+
+void initializeGSM() {
+  Serial.println("Initializing GSM module...");
+  gsmSerial.begin(9600, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
+  delay(3000);
+  while (gsmSerial.available()) { gsmSerial.read(); }
+
+  bool ok = false;
+  for (int i = 0; i < 5 && !ok; i++) {
+    Serial.println("GSM: Attempting AT command...");
+    gsmSerial.println("AT");
+    String response = readGsmResponse(2000);
+    Serial.println("GSM Response: " + response);
+    ok = response.indexOf("OK") != -1;
+    if (!ok) {
+      delay(1000);
+    }
+  }
+
+  if (!ok) {
+    Serial.println("❌ GSM: No response to AT command");
+    gsmReady = false;
+    return;
+  }
+  Serial.println("✅ GSM: AT command successful");
+
+  Serial.println("GSM: Checking SIM status...");
+  gsmSerial.println("AT+CPIN?");
+  String cpin = readGsmResponse(3000);
+  if (cpin.indexOf("READY") == -1) {
+    Serial.println("⚠️ GSM: SIM not ready - Response: " + cpin);
+  } else {
+    Serial.println("✅ GSM: SIM is ready");
+  }
+
+  Serial.println("GSM: Waiting for network registration...");
+  bool registered = false;
+  for (int i = 0; i < 30 && !registered; i++) {
+    gsmSerial.println("AT+CREG?");
+    String resp = readGsmResponse(2000);
+    if (resp.indexOf(",1") != -1 || resp.indexOf(",5") != -1) {
+      registered = true;
+      Serial.println("✅ GSM: Network registered");
+      break;
+    }
+    delay(1000);
+  }
+
+  if (!registered) {
+    Serial.println("⚠️ GSM: Not registered to network");
+  }
+
+  Serial.println("GSM: Setting SMS text mode...");
+  gsmSerial.println("AT+CMGF=1");
+  String smsMode = readGsmResponse(2000);
+  if (smsMode.indexOf("OK") == -1) {
+    Serial.println("❌ GSM: Failed to set SMS text mode");
+  } else {
+    Serial.println("✅ GSM: SMS text mode set");
+  }
+
+  Serial.println("GSM: Setting character set...");
+  gsmSerial.println("AT+CSCS=\"GSM\"");
+  String charset = readGsmResponse(2000);
+
+  Serial.println("GSM: Clearing old SMS messages...");
+  gsmSerial.println("AT+CMGD=1,4");
+  String clearResp = readGsmResponse(3000);
+
+  gsmReady = ok && registered;
+  Serial.println(gsmReady ? "✅ GSM module initialized and ready for SMS" : "❌ GSM module initialized with critical issues");
+}
+
+void setupNTP() {
+  if (!wifiConnected) {
+    Serial.println("Skipping NTP setup - no WiFi connection");
+    return;
+  }
+  Serial.println("Setting up NTP for Philippine Time (UTC+8)...");
+  configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
+  Serial.println("Waiting for NTP synchronization...");
+  int attempts = 0;
+  struct tm timeinfo;
+  while (!getLocalTime(&timeinfo) && attempts < 30) {
+    delay(1000);
+    attempts++;
+    Serial.print(".");
+  }
+  if (getLocalTime(&timeinfo)) {
+    char timeStr[50];
+    strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    Serial.println("\nNTP synchronized successfully: " + String(timeStr));
+  } else {
+    Serial.println("\nNTP synchronization failed - system will continue without accurate time");
+  }
+}
+
+// ============================================================================
+// FIREBASE FUNCTIONS
+// ============================================================================
+void sendSensorDataToFirebase() {
+  if (!wifiConnected) {
+    return;
+  }
+  HTTPClient http;
+  unsigned long long currentTimestamp = getEpochMillis();
+  String isoTimestamp = getIsoTimestamp();
+
+  String sensorUrl = "https://" + String(FIREBASE_HOST) + FIREBASE_SENSOR_PATH + String((unsigned long)currentTimestamp) + ".json";
+  DynamicJsonDocument sensorDoc(512);
+  sensorDoc["deviceTimestamp"] = currentTimestamp;
+  sensorDoc["deviceIso"] = isoTimestamp;
+  JsonObject serverTs = sensorDoc.createNestedObject("serverTimestamp");
+  serverTs[".sv"] = "timestamp";
+  sensorDoc["temperature"] = waterTemperature;
+  sensorDoc["ph"] = waterPH;
+  sensorDoc["dissolvedOxygen"] = dissolvedOxygen;
+  sensorDoc["turbidity"] = turbidityNTU;
+  sensorDoc["waterCondition"] = getWaterCondition();
+  String sensorJson;
+  serializeJson(sensorDoc, sensorJson);
+  http.begin(sensorUrl);
+  http.addHeader("Content-Type", "application/json");
+  int httpResponseCode = http.PUT(sensorJson);
+  if (httpResponseCode == 200) {
+    Serial.println("✅ Sensor data sent to Firebase successfully");
+  } else {
+    Serial.println("❌ Failed to send sensor data to Firebase. HTTP code: " + String(httpResponseCode));
+  }
+  http.end();
+
+  HTTPClient http2;
+  DynamicJsonDocument wcDoc(256);
+  wcDoc["status"] = getWaterCondition();
+  wcDoc["deviceTimestamp"] = currentTimestamp;
+  wcDoc["deviceIso"] = isoTimestamp;
+  JsonObject wcServerTs = wcDoc.createNestedObject("serverTimestamp");
+  wcServerTs[".sv"] = "timestamp";
+  String wcJson; serializeJson(wcDoc, wcJson);
+  String wcUrl = "https://" + String(FIREBASE_HOST) + String(FIREBASE_WATER_CONDITION_PATH);
+  http2.begin(wcUrl);
+  http2.addHeader("Content-Type", "application/json");
+  httpResponseCode = http2.PUT(wcJson);
+  if (httpResponseCode == 200) {
+    Serial.println("✅ Current water condition updated");
+  } else {
+    Serial.println("⚠️ Failed to update current water condition. HTTP: " + String(httpResponseCode));
+  }
+  http2.end();
+}
+
+// ============================================================================
+// TIME AND STATUS DISPLAY FUNCTIONS
+// ============================================================================
+void displayTimeAndStatus() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    char timeStr[50];
+    strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    Serial.println("=== SYSTEM STATUS ===");
+    Serial.println("Current Time: " + String(timeStr));
+    Serial.println("WiFi Status: " + String(wifiConnected ? "Connected" : "Disconnected"));
+    Serial.println("Database Status: " + String(databaseFetchSuccess ? "Success" : "Failed"));
+    Serial.println("Safe Mode: " + String(safeMode ? "Active" : "Inactive"));
+    if (wifiConnected) {
+      Serial.println("Network: " + connectedSSID);
+      Serial.println("IP Address: " + WiFi.localIP().toString());
+    }
+    Serial.println("Automated Feeding Control:");
+    Serial.println("  Morning Feeding: " + String(MORNING_FEED_HOUR) + ":" + String(MORNING_FEED_MINUTE));
+    Serial.println("  Evening Feeding: " + String(EVENING_FEED_HOUR) + ":" + String(EVENING_FEED_MINUTE));
+    Serial.println("  Today's Status: Morning=" + String(lastFeedingMorning ? "Done" : "Pending") + ", Evening=" + String(lastFeedingEvening ? "Done" : "Pending"));
+    Serial.println("  Servo Cycles: " + String(SERVO_CYCLES) + " per feeding");
+    Serial.println("Turbidity Classification: CLEAR >= " + String(TURBIDITY_CLEAR_MIN, 0) + " NTU, DIRTY <= " + String(TURBIDITY_DIRTY_MAX, 0) + " NTU");
+    Serial.println("Emergency Detection: 0.0 NTU = Tank leak/sensor failure (wait for reading change)");
+    Serial.println("Emergency Alert Status: " + String(emergencyAlertSent ? "Alert sent, waiting for change" : "Ready to send alert"));
+    Serial.println("Relay Duration: " + String(RELAY_ON_DURATION/1000) + " seconds");
+    Serial.println("Relay2 Cycle: " + String(RELAY2_ON_DURATION/60000) + " min ON, " + String(RELAY2_OFF_DURATION/60000) + " min OFF");
+    Serial.println("SMS Cooldown: " + String(SMS_COOLDOWN_PERIOD/60000) + " minutes");
+    Serial.println("=====================");
+  } else {
+    Serial.println("Failed to get current time");
+  }
+}
+
+// ============================================================================
+// LCD DISPLAY FUNCTIONS
+// ============================================================================
+void updateLCD() {
+  if (lcdAvailable) {
+    displayScreenOnLCD(currentLCDScreen);
+  }
+}
+
+void cycleLCDDisplay() {
+  if (lcdAvailable) {
+    currentLCDScreen = (currentLCDScreen + 1) % 2;
+    displayScreenOnLCD(currentLCDScreen);
+  }
+}
+
+void displayScreenOnLCD(int screenType) {
+  if (!lcdAvailable) return;
+  lcd.clear();
+  switch (screenType) {
+    case 0:
+      lcd.setCursor(0, 0);
+      lcd.print("Water Parameters");
+      lcd.setCursor(0, 1);
+      lcd.print("T:" + String(waterTemperature, 1) + "C pH:" + String(waterPH, 1));
+      delay(2500);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("DO:" + String(dissolvedOxygen, 1) + "mg/L");
+      lcd.setCursor(0, 1);
+      lcd.print("Turb:" + String(turbidityNTU, 1) + "NTU");
+      break;
+    case 1:
+      lcd.setCursor(0, 0);
+      lcd.print("Water condition:");
+      lcd.setCursor(0, 1);
+      String condition = getWaterCondition();
+      if (condition.length() > 16) {
+        condition = condition.substring(0, 16);
+      }
+      lcd.print(condition);
+      break;
+  }
+}
+
+// ============================================================================
+// TURBIDITY HISTORY MANAGEMENT
+// ============================================================================
+void updateTurbidityHistory() {
+  turbidityHistory[turbidityHistoryIndex] = turbidityNTU;
+  turbidityHistoryIndex = (turbidityHistoryIndex + 1) % 5;
+
+  float sum = 0;
+  int validReadings = 0;
+  for (int i = 0; i < 3; i++) {
+    int index = (turbidityHistoryIndex - 1 - i + 5) % 5;
+    if (turbidityHistory[index] > 0) {
+      sum += turbidityHistory[index];
+      validReadings++;
+    }
+  }
+  if (validReadings > 0) {
+    averageTurbidity = sum / validReadings;
+  }
+
+  float maxDiff = 0;
+  for (int i = 0; i < 3; i++) {
+    for (int j = i + 1; j < 3; j++) {
+      int index1 = (turbidityHistoryIndex - 1 - i + 5) % 5;
+      int index2 = (turbidityHistoryIndex - 1 - j + 5) % 5;
+      if (turbidityHistory[index1] > 0 && turbidityHistory[index2] > 0) {
+        float diff = abs(turbidityHistory[index1] - turbidityHistory[index2]);
+        if (diff > maxDiff) maxDiff = diff;
+      }
+    }
+  }
+  turbidityStable = (maxDiff < 15.0);
+
+  if (turbidityStable && validReadings >= 2) {
+    turbidityNTU = (turbidityNTU + averageTurbidity) / 2.0;
+  }
+}
+
+// ============================================================================
+// ERROR HANDLING
+// ============================================================================
+void checkSensorFailures() {
+  static int tempFailureCount = 0;
+  static int phFailureCount = 0;
+  static int doFailureCount = 0;
+  static int turbidityFailureCount = 0;
+
+  if (!isValidSensorReading(waterTemperature, -40, 80)) {
+    tempFailureCount++;
+    if (tempFailureCount >= 3) {
+      sendSMSAlert("🚨 CRITICAL: Temperature sensor failure detected!");
+      tempFailureCount = 0;
+    }
+  } else {
+    tempFailureCount = 0;
+  }
+
+  if (!isValidSensorReading(waterPH, 0, 14)) {
+    phFailureCount++;
+    if (phFailureCount >= 3) {
+      sendSMSAlert("🚨 CRITICAL: pH sensor failure detected!");
+      phFailureCount = 0;
+    }
+  } else {
+    phFailureCount = 0;
+  }
+
+  if (!isValidSensorReading(dissolvedOxygen, 0, 20)) {
+    doFailureCount++;
+    if (doFailureCount >= 3) {
+      sendSMSAlert("🚨 CRITICAL: DO sensor failure detected!");
+      doFailureCount = 0;
+    }
+  } else {
+    doFailureCount = 0;
+  }
+
+  if (!isValidSensorReading(turbidityNTU, 0, 100)) {
+    turbidityFailureCount++;
+    if (turbidityFailureCount >= 3) {
+      sendSMSAlert("🚨 CRITICAL: Turbidity sensor failure detected!");
+      turbidityFailureCount = 0;
+    }
+  } else {
+    turbidityFailureCount = 0;
+  }
+}
+
+bool isValidSensorReading(float value, float min, float max) {
+  return !isnan(value) && value >= min && value <= max;
+}
+
+// ============================================================================
+// TIME/TIMESTAMP HELPERS
+// ============================================================================
+unsigned long long getEpochMillis() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    time_t epoch = mktime(&timeinfo);
+    if (epoch > 0) {
+      unsigned long ms = millis() % 1000UL;
+      unsigned long long epochMs = ((unsigned long long)epoch) * 1000ULL + (unsigned long long)ms;
+      return epochMs;
+    }
+  }
+  return (unsigned long long)millis();
+}
+
+String getIsoTimestamp() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
+    char withMs[40];
+    snprintf(withMs, sizeof(withMs), "%s.%03lu", buf, millis() % 1000UL);
+    return String(withMs);
+  }
+  return String((unsigned long)millis());
+}
